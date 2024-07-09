@@ -73,21 +73,25 @@
               </TableRow>
             </TableHeader>
             <TableBody>
-              <TableRow v-for="tx in transactions" :key="tx.txid">
-                <TableCell class="text-white">{{ formatDate(tx.status.block_time) }}</TableCell>
-                <TableCell>
-                  <Badge variant="outline" :class="tx.amount > 0 ? 'border-green-600 text-green-500' : 'border-red-600 text-red-500'">
-                    {{ tx.amount > 0 ? 'Received BTC' : 'Sent BTC' }}
-                  </Badge>
-                </TableCell>
-                <TableCell :class="tx.amount > 0 ? 'text-green-500' : 'text-red-500'">
-                  {{ (tx.amount / 100000000).toFixed(8) }} BTC
-                </TableCell>
-                <TableCell>
-                  <Badge variant="secondary">{{ tx.status.confirmed ? 'Confirmed' : 'Pending' }}</Badge>
-                </TableCell>
-              </TableRow>
-            </TableBody>
+  <TableRow v-for="tx in transactions" :key="tx.txid">
+    <NuxtLink :to="`/tx/btc/${tx.txid}`" class="contents hover:bg-gray-700">
+      <TableCell class="text-white">{{ formatDate(tx.status.block_time) }}</TableCell>
+      <TableCell>
+        <Badge variant="outline" :class="getTransactionType(tx).class">
+          {{ getTransactionType(tx).label }}
+        </Badge>
+      </TableCell>
+      <TableCell :class="getTransactionType(tx).class">
+        {{ formatBitcoinAmount(getTransactionAmount(tx)) }} BTC
+      </TableCell>
+      <TableCell>
+        <Badge variant="secondary" :class="getConfirmationClass(getConfirmations(tx))">
+          {{ getConfirmations(tx) }}
+        </Badge>
+      </TableCell>
+    </NuxtLink>
+  </TableRow>
+</TableBody>
           </Table>
         </div>
       </div>
@@ -95,11 +99,15 @@
   </template>
   
   <script setup>
-    const keysStore=useKeysStore()
+  const keysStore = useKeysStore();
   const addressStore = useAddressStore();
   
   onMounted(() => {
-    addressStore.fetchBalanceAndTransactions();
+    addressStore.startIntervals();
+  });
+  
+  onUnmounted(() => {
+    addressStore.stopIntervals();
   });
   
   const transactions = computed(() => {
@@ -108,18 +116,70 @@
       .sort((a, b) => b.status.block_time - a.status.block_time);
   });
   
+  function getTransactionType(tx) {
+    const inputAddresses = tx.vin.map(input => input.prevout.scriptpubkey_address);
+    const outputAddresses = tx.vout.map(output => output.scriptpubkey_address);
+    const ourAddresses = Object.keys(addressStore.addressesData);
+  
+    const isIncoming = outputAddresses.some(address => ourAddresses.includes(address));
+    const isOutgoing = inputAddresses.some(address => ourAddresses.includes(address));
+  
+    if (isIncoming && !isOutgoing) {
+      return { label: 'Received BTC', class: 'border-green-600 text-green-500' };
+    } else if (isOutgoing) {
+      return { label: 'Sent BTC', class: 'border-red-600 text-red-500' };
+    } else {
+      return { label: 'Internal Transfer', class: 'border-yellow-600 text-yellow-500' };
+    }
+  }
+  
+  function getTransactionAmount(tx) {
+    const ourAddresses = Object.keys(addressStore.addressesData);
+    let amount = 0;
+  
+    // Sum up incoming amounts
+    tx.vout.forEach(output => {
+      if (ourAddresses.includes(output.scriptpubkey_address)) {
+        amount += output.value;
+      }
+    });
+  
+    // Subtract outgoing amounts
+    tx.vin.forEach(input => {
+      if (ourAddresses.includes(input.prevout.scriptpubkey_address)) {
+        amount -= input.prevout.value;
+      }
+    });
+  
+    return amount;
+  }
+  
+  function formatBitcoinAmount(satoshis) {
+    return (satoshis / 100000000).toFixed(8);
+  }
+  
+  function getConfirmations(tx) {
+    return tx.status.confirmed
+      ? addressStore.currentBitcoinBlockHeight - tx.status.block_height + 1
+      : 0;
+  }
+  
   function formatDate(timestamp) {
     return new Date(timestamp * 1000).toLocaleString();
   }
   
   function copyToClipboard(text) {
     navigator.clipboard.writeText(text);
-    // You might want to add a toast notification here
   }
   
   function getFreshAddress() {
     const addressCount = Object.keys(addressStore.addressesData).length;
-    // This is a placeholder. You'll need to implement the actual derivation logic
-    return keysStore.getAddress("p2wpkh",addressCount)
+    return keysStore.getAddress("p2wpkh", addressCount);
+  }
+  
+  function getConfirmationClass(confirmations) {
+    if (confirmations <= 0) return 'bg-red-500 text-white';
+    if (confirmations < 6) return 'bg-yellow-500 text-black';
+    return 'bg-green-500 text-white';
   }
   </script>

@@ -1,7 +1,10 @@
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
 import { useKeysStore } from './useKeysStore';
 const bitcoin = require('bitcoinjs-lib');
+
+function wait(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 export const useAddressStore = defineStore('addressManager', () => {
     const keyStore = useKeysStore();
@@ -9,8 +12,14 @@ export const useAddressStore = defineStore('addressManager', () => {
     let isLoading = ref(false);
     let error = ref(null);
     let lastUsedIndices = ref({});
-
+    let currentBitcoinBlockHeight = ref(0);
+    let isMounted = ref(true);
     const WALLET_LIMIT = 20; // Number of unused addresses to check before stopping
+    const BLOCK_HEIGHT_FETCH_INTERVAL = 60000; // 1 minute in milliseconds
+    const BALANCE_FETCH_INTERVAL = 300000; // 5 minutes in milliseconds
+
+    let blockHeightInterval = null;
+    let balanceInterval = null;
 
     async function makeRequest(url) {
         try {
@@ -20,7 +29,17 @@ export const useAddressStore = defineStore('addressManager', () => {
             }
             return await response.json();
         } catch (err) {
-            throw new Error(`Fetch error: ${err.message}`);
+            await wait(1000);
+            return await makeRequest(url);
+        }
+    }
+
+    async function fetchLatestBlockHeight() {
+        try {
+            const height = await makeRequest('https://blockstream.info/api/blocks/tip/height');
+            currentBitcoinBlockHeight.value = height;
+        } catch (err) {
+            console.error('Error fetching latest block height:', err);
         }
     }
 
@@ -28,37 +47,39 @@ export const useAddressStore = defineStore('addressManager', () => {
         let index = 0;
         let walletNumber = 0;
         const external = 0; // Using 0 as the default for the main chain
-
-        while (true) {
+        while (isMounted.value) {
             const address = keyStore.getAddress(type, external, index);
             const balanceUrl = `https://blockstream.info/api/address/${address}`;
             const txUrl = `https://blockstream.info/api/address/${address}/txs`;
-
             const balanceResult = await makeRequest(balanceUrl);
             const history = await makeRequest(txUrl);
-
             const balance = balanceResult.chain_stats.funded_txo_sum - balanceResult.chain_stats.spent_txo_sum;
-
             if (balance > 0 || history.length > 0) {
                 addressesData.value[address] = {
                     balance: balance,
                     transactions: history,
-                    index:index
+                    index: index
                 };
                 walletNumber = 0;
                 lastUsedIndices.value[type] = index;
             } else {
-                walletNumber=walletNumber+1%WALLET_LIMIT;
+                walletNumber = (walletNumber + 1) % WALLET_LIMIT;
             }
-
             index++;
+            if (walletNumber === 0 && index > lastUsedIndices.value[type]) {
+                break;
+            }
+            if (!isMounted.value) {
+                console.log('Address discovery stopped due to unmount');
+                break;
+            }
         }
     }
 
     async function fetchBalanceAndTransactions() {
+        if (isLoading.value) return; // Prevent concurrent calls
         isLoading.value = true;
         error.value = null;
-
         try {
             await discoverAddresses('p2wpkh');  // For BIP84
             await discoverAddresses('p2pkh');   // For BIP44
@@ -66,6 +87,58 @@ export const useAddressStore = defineStore('addressManager', () => {
             error.value = err.message;
         } finally {
             isLoading.value = false;
+        }
+    }
+
+    function startIntervals() {
+        isMounted.value = true;
+        if (!blockHeightInterval) {
+            fetchLatestBlockHeight(); // Fetch immediately
+            blockHeightInterval = setInterval(fetchLatestBlockHeight, BLOCK_HEIGHT_FETCH_INTERVAL);
+        }
+        if (!balanceInterval) {
+            fetchBalanceAndTransactions(); // Fetch immediately
+            balanceInterval = setInterval(fetchBalanceAndTransactions, BALANCE_FETCH_INTERVAL);
+        }
+    }
+
+    async function fetchTransactionDetails(txId) {
+        if (!txId) {
+            throw new Error('Transaction ID is required');
+        }
+
+        try {
+            const txUrl = `https://blockstream.info/api/tx/${txId}`;
+            const txData = await makeRequest(txUrl);
+
+            // Fetch additional data for inputs
+            for (let input of txData.vin) {
+                const prevTxUrl = `https://blockstream.info/api/tx/${input.txid}`;
+                const prevTxData = await makeRequest(prevTxUrl);
+                input.prevout = prevTxData.vout[input.vout];
+            }
+
+            // Calculate fee
+            const inputSum = txData.vin.reduce((sum, input) => sum + input.prevout.value, 0);
+            const outputSum = txData.vout.reduce((sum, output) => sum + output.value, 0);
+            txData.fee = inputSum - outputSum;
+
+            return txData;
+        } catch (err) {
+            console.error('Error fetching transaction details:', err);
+            throw new Error('Failed to fetch transaction details');
+        }
+    }
+
+    function stopIntervals() {
+        isMounted.value = false;
+        if (blockHeightInterval) {
+            clearInterval(blockHeightInterval);
+            blockHeightInterval = null;
+        }
+        if (balanceInterval) {
+            clearInterval(balanceInterval);
+            balanceInterval = null;
         }
     }
 
@@ -84,6 +157,10 @@ export const useAddressStore = defineStore('addressManager', () => {
         error,
         totalBalance,
         getFormattedTotalBalance,
-        lastUsedIndices
+        lastUsedIndices,
+        currentBitcoinBlockHeight,
+        startIntervals,
+        stopIntervals,
+        fetchTransactionDetails
     };
 });
