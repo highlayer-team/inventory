@@ -46,7 +46,7 @@
 </template>
 
 <script setup>
-import { useKeysStore } from '../stores/keys';
+import { useKeysStore } from '../stores/useKeysStore';
 
 const bip39 = require("bip39")
 const keyManager=useKeysStore()

@@ -11,14 +11,14 @@ export const useKeysStore=defineStore('keyManager', ()=>{
     let account=ref(null)
     if(entropy.value){
         root.value=bip32.fromSeed(bip39.mnemonicToSeedSync(bip39.entropyToMnemonic(entropy.value)))
-        account.value=root.value.derivePath("m/44'/0'/0'")
+        account.value=root.value.derivePath("m/84'/0'/0'")
     }
 
     function setEntropy(newEntropy){
         entropy.value=newEntropy
         localStorage.setItem('entropy',newEntropy)
         root.value=bip32.fromSeed(bip39.mnemonicToSeedSync(bip39.entropyToMnemonic(newEntropy)))
-        account.value=root.value.derivePath("m/44'/0'/0'")
+        account.value=root.value.derivePath("m/84'/0'/0'")
     }
     function getAddress(type, index, external=0){
 
