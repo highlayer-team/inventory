@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
 import { useKeysStore } from './useKeysStore';
+import { ref, computed } from 'vue';
 const bitcoin = require('bitcoinjs-lib');
 
 function wait(ms) {
@@ -11,15 +12,15 @@ export const useAddressStore = defineStore('addressManager', () => {
     let addressesData = ref({});
     let isLoading = ref(false);
     let error = ref(null);
-    let lastUsedIndices = ref({});
     let currentBitcoinBlockHeight = ref(0);
     let isMounted = ref(true);
-    const WALLET_LIMIT = 20; // Number of unused addresses to check before stopping
-    const BLOCK_HEIGHT_FETCH_INTERVAL = 60000; // 1 minute in milliseconds
-    const BALANCE_FETCH_INTERVAL = 300000; // 5 minutes in milliseconds
+    let addressAmountsByType=ref({
+        p2pkh:0,
+        p2wpkh:0
+    })
+    const REFRESH_INTERVAL = 300000; // 5 minutes in milliseconds
 
-    let blockHeightInterval = null;
-    let balanceInterval = null;
+    let refreshInterval = null;
 
     async function makeRequest(url) {
         try {
@@ -36,70 +37,73 @@ export const useAddressStore = defineStore('addressManager', () => {
 
     async function fetchLatestBlockHeight() {
         try {
-            const height = await makeRequest('https://blockstream.info/api/blocks/tip/height');
+            const height = await makeRequest('https://mempool.space/api/blocks/tip/height');
             currentBitcoinBlockHeight.value = height;
         } catch (err) {
             console.error('Error fetching latest block height:', err);
         }
     }
 
-    async function discoverAddresses(type) {
-        let index = 0;
-        let walletNumber = 0;
-        const external = 0; // Using 0 as the default for the main chain
-        while (isMounted.value) {
-            const address = keyStore.getAddress(type, external, index);
-            const balanceUrl = `https://blockstream.info/api/address/${address}`;
-            const txUrl = `https://blockstream.info/api/address/${address}/txs`;
-            const balanceResult = await makeRequest(balanceUrl);
-            const history = await makeRequest(txUrl);
-            const balance = balanceResult.chain_stats.funded_txo_sum - balanceResult.chain_stats.spent_txo_sum;
-            if (balance > 0 || history.length > 0) {
-                addressesData.value[address] = {
-                    balance: balance,
-                    transactions: history,
-                    index: index
-                };
-                walletNumber = 0;
-                lastUsedIndices.value[type] = index;
-            } else {
-                walletNumber = (walletNumber + 1) % WALLET_LIMIT;
-            }
-            index++;
-            if (walletNumber === 0 && index > lastUsedIndices.value[type]) {
-                break;
-            }
-            if (!isMounted.value) {
-                console.log('Address discovery stopped due to unmount');
-                break;
-            }
+    async function checkAddress(type, index) {
+
+        const address = keyStore.getAddress(type, index);
+        const balanceUrl = `https://mempool.space/api/address/${address}`;
+        const txUrl = `https://mempool.space/api/address/${address}/txs`;
+        const balanceResult = await makeRequest(balanceUrl);
+        const history = await makeRequest(txUrl);
+        const balance = balanceResult.chain_stats.funded_txo_sum - balanceResult.chain_stats.spent_txo_sum;
+        if(history.length>0){
+            addressesData.value[address] = {
+                type,
+                balance: balance,
+                transactions: history,
+                index: index
+            };
         }
+        return history.length > 0;
     }
 
-    async function fetchBalanceAndTransactions() {
-        if (isLoading.value) return; // Prevent concurrent calls
+    async function discoverAddresses(type) {
+        let index = 0;
+        while (isMounted.value) {
+            const hasTransactions = await checkAddress(type, index);
+            if (!hasTransactions) {
+                await wait(10000)
+              
+               index = 0
+            
+            }else{
+                index++;
+                addressAmountsByType.value[type]=Math.max(addressAmountsByType.value[type],index);
+            }
+         
+        }
+    }
+    
+    async function startPolling() {
+        if (isLoading.value) return; 
         isLoading.value = true;
         error.value = null;
         try {
-            await discoverAddresses('p2wpkh');  // For BIP84
-            await discoverAddresses('p2pkh');   // For BIP44
+                discoverAddresses('p2wpkh'),  // For BIP84
+                discoverAddresses('p2pkh')    // For BIP44
+            
         } catch (err) {
             error.value = err.message;
         } finally {
             isLoading.value = false;
         }
+
     }
+    
+
+
 
     function startIntervals() {
         isMounted.value = true;
-        if (!blockHeightInterval) {
-            fetchLatestBlockHeight(); // Fetch immediately
-            blockHeightInterval = setInterval(fetchLatestBlockHeight, BLOCK_HEIGHT_FETCH_INTERVAL);
-        }
-        if (!balanceInterval) {
-            fetchBalanceAndTransactions(); // Fetch immediately
-            balanceInterval = setInterval(fetchBalanceAndTransactions, BALANCE_FETCH_INTERVAL);
-        }
+        fetchLatestBlockHeight(); 
+        startPolling(); 
+        refreshInterval = setInterval(fetchLatestBlockHeight, REFRESH_INTERVAL);
     }
 
     async function fetchTransactionDetails(txId) {
@@ -108,12 +112,12 @@ export const useAddressStore = defineStore('addressManager', () => {
         }
 
         try {
-            const txUrl = `https://blockstream.info/api/tx/${txId}`;
+            const txUrl = `https://mempool.space/api/tx/${txId}`;
             const txData = await makeRequest(txUrl);
 
             // Fetch additional data for inputs
             for (let input of txData.vin) {
-                const prevTxUrl = `https://blockstream.info/api/tx/${input.txid}`;
+                const prevTxUrl = `https://mempool.space/api/tx/${input.txid}`;
                 const prevTxData = await makeRequest(prevTxUrl);
                 input.prevout = prevTxData.vout[input.vout];
             }
@@ -132,13 +136,9 @@ export const useAddressStore = defineStore('addressManager', () => {
 
     function stopIntervals() {
         isMounted.value = false;
-        if (blockHeightInterval) {
-            clearInterval(blockHeightInterval);
-            blockHeightInterval = null;
-        }
-        if (balanceInterval) {
-            clearInterval(balanceInterval);
-            balanceInterval = null;
+        if (refreshInterval) {
+            clearInterval(refreshInterval);
+            refreshInterval = null;
         }
     }
 
@@ -151,16 +151,15 @@ export const useAddressStore = defineStore('addressManager', () => {
     }
 
     return {
-        fetchBalanceAndTransactions,
         addressesData,
         isLoading,
         error,
         totalBalance,
         getFormattedTotalBalance,
-        lastUsedIndices,
         currentBitcoinBlockHeight,
         startIntervals,
         stopIntervals,
+        addressAmountsByType,
         fetchTransactionDetails
     };
 });

@@ -20,6 +20,12 @@ export const useKeysStore=defineStore('keyManager', ()=>{
         root.value=bip32.fromSeed(bip39.mnemonicToSeedSync(bip39.entropyToMnemonic(newEntropy)))
         account.value=root.value.derivePath("m/84'/0'/0'")
     }
+    function logout(){
+        entropy.value=null
+        localStorage.setItem('entropy',null)
+        root.value=null
+        account.value=null
+    }
     function getAddress(type, index, external=0){
 
         const { address } = bitcoin.payments[type]({ pubkey: account.value.derive(external).derive(index).publicKey });
@@ -46,6 +52,7 @@ export const useKeysStore=defineStore('keyManager', ()=>{
         setEntropy,
         getAddress,
         signPSBT,
-        account
+        account,
+        logout
     }
 })
